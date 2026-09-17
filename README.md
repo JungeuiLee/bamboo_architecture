@@ -193,6 +193,4 @@ Bamboo is an operating service. Publishing the Firestore security rules, App Che
 
 <p align="center">
   <a href="https://apps.apple.com/us/app/bamboo-campus-community/id6799337020">App Store</a> ·
-  <a href="https://jungeui-website.vercel.app/">Portfolio</a> ·
-  <a href="https://linkedin.com/in/jungeui1297">LinkedIn</a>
 </p>
