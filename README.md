@@ -11,7 +11,6 @@
 
 ![Bamboo screens](screens.png)
 
-
 ---
 
 Bamboo is live on the App Store. Its application repository is private, so this document covers the part that can be shared: the problems the system had to solve and why it is built the way it is.
@@ -39,38 +38,36 @@ The first cohort is Korean international students, which is why the UI in the sc
 
 ```mermaid
 flowchart TB
-    subgraph client[Flutter iOS app]
+    subgraph client[Mobile app]
         feed[Feed & post composer]
         auth[.edu email signup]
     end
 
-    subgraph admin[Flutter Web · admin dashboard]
+    subgraph admin[Admin dashboard · web]
         mod[Moderation & school management]
     end
 
-    subgraph firebase[Firebase]
-        fsauth[Auth]
-        fs[(Firestore)]
-        storage[(Storage)]
-        fn[Cloud Functions]
+    subgraph backend[Managed backend]
+        idp[Identity provider]
+        db[(Document database)]
+        blob[(Object storage)]
+        fn[Serverless functions]
     end
 
-    resend[Resend · transactional email]
+    mail[Transactional email provider]
 
-    feed --> fs
+    feed --> db
     auth --> fn
-    mod --> fs
-    fn --> resend
-    fn --> fs
-    fn --> storage
-    fs -. triggers .-> fn
-
-    style firebase fill:#1a1a1a,color:#fff
+    mod --> db
+    fn --> mail
+    fn --> db
+    fn --> blob
+    db -. change triggers .-> fn
 ```
 
-Two Flutter apps share one codebase: the student mobile app and a web-only admin dashboard, built from separate entrypoints and deployed independently.
+Two apps share one codebase: the student mobile app and a web-only admin dashboard, built from separate entrypoints and deployed independently.
 
-**Firestore rules are the authorization boundary, not app code.** UI-level gates are conveniences. Every access decision is expressed in `firestore.rules` and composed from helpers (`userDomain()`, `isVerified()`, `canAccessPost()`). Admins get a blanket allow at the bottom of the file — *except* for a carve-out list of sensitive collections (email verification records, password resets, rate limits, moderation log, private journals) that stay server-only even for admins.
+**Security rules are the authorization boundary, not app code.** UI-level gates are conveniences. Every access decision is expressed in the rules file and composed from helpers (`userDomain()`, `isVerified()`, `canAccessPost()`). Admins get a blanket allow at the bottom of the file — *except* for a carve-out list of sensitive collections (email verification records, password resets, rate limits, moderation log, private journals) that stay server-only even for admins.
 
 **Multi-tenancy is derived, not stored as a foreign key.** A user's campus comes from their email domain. Content carries the same domain field and feeds filter on it — except posts flagged global, which intentionally bypass campus scoping for the weekly cross-campus feature.
 
@@ -92,7 +89,7 @@ So the rate-limit slot is reserved **before** the branch and regardless of regis
 // "does calling repeatedly return 429?" even with identical response bodies.
 const code = await reserveSendSlot(ref, now, quotaMessage);
 
-// Only the message content differs. Both branches make one Resend call.
+// Only the message content differs. Both branches make one outbound send.
 const mail = alreadyRegistered ? alreadyRegisteredMail : verificationCodeMail;
 ```
 
@@ -104,7 +101,7 @@ The reservation and the counter increment also had to move into a single transac
 
 A post that gets 200 likes should not send its author 200 push notifications. The obvious fix is a cooldown timer, which means tracking last-sent state per user per post and reasoning about races.
 
-Instead, likes write to a **deterministic document ID** — `like_{postId}_{6-hour bucket}` — with a merge write, and push is sent by the `onNotificationCreated` trigger:
+Instead, likes write to a **deterministic document ID** — `like_{postId}_{6-hour bucket}` — with a merge write, and push is sent by the notification-created trigger:
 
 - The first like in a bucket **creates** the document → the create trigger fires → one push.
 - Every later like **updates** it → no create event → no push.
@@ -120,7 +117,7 @@ Comment notifications stay one document per event: each carries its own preview 
 
 ### 3. Counters are eventually consistent by design
 
-Counter triggers are not idempotent. Eventarc delivers at-least-once, and event-triggered functions default to no retry — so a duplicate delivery double-counts, and a failed update under contention drops an increment permanently. Turning retry on trades one failure mode for the other. Neither setting is safe alone.
+Counter triggers are not idempotent. The event system delivers at-least-once, and event-triggered functions default to no retry — so a duplicate delivery double-counts, and a failed update under contention drops an increment permanently. Turning retry on trades one failure mode for the other. Neither setting is safe alone.
 
 The resolution is to stop treating the trigger as authoritative:
 
@@ -130,7 +127,7 @@ The resolution is to stop treating the trigger as authoritative:
 
 ### 4. Load testing the counter path — and being wrong about the ceiling
 
-Firestore's sustained write limit is roughly one write per second per document. A popular post concentrates like, comment, and poll-vote counter writes onto that single document, and likes additionally hit the aggregate notification document — so the hot document is not one, it is two.
+The database's sustained write limit is roughly one write per second per document. A popular post concentrates like, comment, and poll-vote counter writes onto that single document, and likes additionally hit the aggregate notification document — so the hot document is not one, it is two.
 
 A load-test harness drives concurrent likes, comments, and votes at a single post and measures three distinct numbers, because "was anything lost?" is the wrong question when a reconcile job repairs losses anyway:
 
@@ -162,19 +159,19 @@ votes       7.1 → 20.5 → 37.7 → 49.5 /s
                           ^^^^^^^^^^ three different functions, same ceiling
 ```
 
-The first explanation considered was the function instance cap: 10 instances × ~5 calls/sec each ≈ 50/sec, which matched the observation suspiciously well. **That arithmetic was wrong.** It assumes one instance handles one request at a time, which is not true for these functions — their deployed concurrency is 80 per instance. Checking the live Cloud Run configuration instead of trusting the formula:
+The first explanation considered was the function instance cap: 10 instances × ~5 calls/sec each ≈ 50/sec, which matched the observation suspiciously well. **That arithmetic was wrong.** It assumes one instance handles one request at a time, which is not true for these functions — their deployed concurrency is 80 per instance. Checking the live container configuration instead of trusting the formula:
 
-| Service | Concurrency | Max instances |
+| Trigger | Concurrency | Max instances |
 |---|---|---|
-| onLikeCreated | 80 | 10 |
-| onCommentCreated | 80 | 10 |
-| onVoteWritten | 80 | 10 |
+| Like created | 80 | 10 |
+| Comment created | 80 | 10 |
+| Vote written | 80 | 10 |
 
 The real concurrent ceiling is 800, not 10. Had the instance cap been the constraint, throughput would have been on the order of thousands per second — two orders of magnitude above what was observed. The instance cap was never approached.
 
 That leaves the per-document write limit as the remaining explanation, which is what the harness set out to measure in the first place. It is still an inference, and the experiment that would settle it is documented rather than assumed away: redistribute the same event volume across N posts. If throughput rises, the limit is per-document and raising the instance cap will not help — fixing it would require sharded counters, which is a design change, not a configuration change.
 
-The takeaway here is not about Firestore. A number that matches a plausible formula is not evidence, and checking the deployed configuration took ten minutes.
+The takeaway here is not about any one database. A number that matches a plausible formula is not evidence, and checking the deployed configuration took ten minutes.
 
 ---
 
@@ -186,10 +183,12 @@ The takeaway here is not about Firestore. A number that matches a plausible form
 
 ## A note on the code
 
-Bamboo is an operating service. Publishing the Firestore security rules, App Check configuration, and account-deletion flow of a running product is not a reasonable trade for a public repository, so the application code stays private and this document serves as the design record.
+Bamboo is an operating service. Publishing the security rules, App Check configuration, and account-deletion flow of a running product is not a reasonable trade for a public repository, so the application code stays private and this document serves as the design record.
 
 ---
 
 <p align="center">
   <a href="https://apps.apple.com/us/app/bamboo-campus-community/id6799337020">App Store</a> ·
+  <a href="https://jungeui-website.vercel.app/">Portfolio</a> ·
+  <a href="https://linkedin.com/in/jungeui1297">LinkedIn</a>
 </p>
