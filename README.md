@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" width="220" alt="Bamboo">
+  <img src="logo.png" width="220" alt="Bamboo">
 </p>
 
 <h1 align="center">Bamboo — Architecture Case Study</h1>
@@ -9,13 +9,13 @@
   <a href="https://apps.apple.com/us/app/bamboo-campus-community/id6799337020"><b>Download on the App Store</b></a>
 </p>
 
-![Bamboo screens](docs/screens.png)
+![Bamboo screens](screens.png)
 
 <p align="center"><i>Left to right: daily balance game · anonymous post composer · private journal · campus event board · cross-campus global feed</i></p>
 
 ---
 
-I am the co-founder and head of engineering on Bamboo. The product is live on the App Store, and the application code is private. This document is the part I can share: the problems the system had to solve and why it is built the way it is.
+Bamboo is live on the App Store. Its application repository is private, so this document covers the part that can be shared: the problems the system had to solve and why it is built the way it is.
 
 **Stack:** Flutter (iOS) · Firebase (Firestore, Auth, Cloud Functions, Storage, App Check) · Flutter Web admin dashboard
 
@@ -30,9 +30,9 @@ That produces a specific and slightly contradictory requirement:
 - **Identity must be verified.** An anonymous forum with open signup fills with outsiders, and the value of the space is that everyone in it actually goes to your school.
 - **Conversation must be anonymous.** The questions worth asking are the ones people will not attach their name to.
 
-So the system verifies who you are at the door and then deliberately forgets it in every post you write. Signup requires a `.edu` email; the address determines your campus and is never shown to anyone.
+So the system verifies identity at the door and then deliberately forgets it in every post. Signup requires a `.edu` email; the address determines the campus and is never shown to anyone.
 
-The first cohort is Korean international students, where the need was most concrete and I could reach users directly — which is why the UI in the screenshots is Korean. The data model is campus-scoped from the start, so additional campuses and languages are new rows, not a migration.
+The first cohort is Korean international students, which is why the UI in the screenshots is Korean. The data model is campus-scoped from the start, so additional campuses and languages are new rows rather than a migration.
 
 ---
 
@@ -133,7 +133,7 @@ The resolution is to stop treating the trigger as authoritative:
 
 Firestore's sustained write limit is roughly one write per second per document. A popular post concentrates like, comment, and poll-vote counter writes onto that single document, and likes additionally hit the aggregate notification document — so the hot document is not one, it is two.
 
-I built a harness that drives concurrent likes, comments, and votes at a single post and measures three distinct numbers, because "was anything lost?" is the wrong question when a reconcile job repairs losses anyway:
+A load-test harness drives concurrent likes, comments, and votes at a single post and measures three distinct numbers, because "was anything lost?" is the wrong question when a reconcile job repairs losses anyway:
 
 | Metric | What it means |
 |---|---|
@@ -163,7 +163,7 @@ votes       7.1 → 20.5 → 37.7 → 49.5 /s
                           ^^^^^^^^^^ three different functions, same ceiling
 ```
 
-My first explanation was the function instance cap: 10 instances × ~5 calls/sec each ≈ 50/sec, which matched suspiciously well. **That arithmetic was wrong.** It assumed one instance handles one request at a time, which is not true for these functions — their deployed concurrency is 80 per instance. I checked the live Cloud Run configuration rather than trusting the assumption:
+The first explanation considered was the function instance cap: 10 instances × ~5 calls/sec each ≈ 50/sec, which matched the observation suspiciously well. **That arithmetic was wrong.** It assumes one instance handles one request at a time, which is not true for these functions — their deployed concurrency is 80 per instance. Checking the live Cloud Run configuration instead of trusting the formula:
 
 | Service | Concurrency | Max instances |
 |---|---|---|
@@ -173,9 +173,9 @@ My first explanation was the function instance cap: 10 instances × ~5 calls/sec
 
 The real concurrent ceiling is 800, not 10. Had the instance cap been the constraint, throughput would have been on the order of thousands per second — two orders of magnitude above what was observed. The instance cap was never approached.
 
-That leaves the per-document write limit as the remaining explanation, which is what the harness set out to measure in the first place. It is still an inference, and the document says so along with the experiment that would settle it: redistribute the same event volume across N posts. If throughput rises, the limit is per-document and raising the instance cap will not help — fixing it would require sharded counters, which is a design change, not a configuration change.
+That leaves the per-document write limit as the remaining explanation, which is what the harness set out to measure in the first place. It is still an inference, and the experiment that would settle it is documented rather than assumed away: redistribute the same event volume across N posts. If throughput rises, the limit is per-document and raising the instance cap will not help — fixing it would require sharded counters, which is a design change, not a configuration change.
 
-The lesson I took from this is not about Firestore. It is that a number matching a plausible formula is not evidence, and checking the deployed configuration took ten minutes.
+The takeaway here is not about Firestore. A number that matches a plausible formula is not evidence, and checking the deployed configuration took ten minutes.
 
 ---
 
@@ -187,7 +187,7 @@ The lesson I took from this is not about Firestore. It is that a number matching
 
 ## A note on the code
 
-Bamboo is an operating service, so the application repository is private — publishing Firestore security rules, App Check configuration, and the account-deletion flow of a running product is not something I am willing to do for a portfolio. This document is the design record instead.
+Bamboo is an operating service. Publishing the Firestore security rules, App Check configuration, and account-deletion flow of a running product is not a reasonable trade for a public repository, so the application code stays private and this document serves as the design record.
 
 ---
 
