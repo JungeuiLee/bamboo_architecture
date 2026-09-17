@@ -11,7 +11,6 @@
 
 ![Bamboo screens](screens.png)
 
-<p align="center"><i>Left to right: daily balance game · anonymous post composer · private journal · campus event board · cross-campus global feed</i></p>
 
 ---
 
