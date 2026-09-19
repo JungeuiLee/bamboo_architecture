@@ -178,7 +178,6 @@ The takeaway here is not about any one database. A number that matches a plausib
 ## Where it is now
 
 - Live on the App Store
-- 150+ verified users, 124+ downloads
 - Expanding to additional campuses
 
 ## A note on the code
